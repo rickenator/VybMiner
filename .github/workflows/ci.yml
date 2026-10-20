@@ -17,7 +17,7 @@ concurrency:
 env:
   # Vyb with `--target` (freestanding cross-compile). Pinned by commit.
   VYB_REPO: rickenator/Vyb
-  VYB_REF: VYB_REF_PLACEHOLDER
+  VYB_REF: d5f1d52126a08c02fa1cb243ed1843f1571c8306
 
 jobs:
   host:
