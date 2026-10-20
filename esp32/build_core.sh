@@ -20,7 +20,9 @@ python3 ../tools/elf_syms.py "$OUT/nerd_core.o"
 OD=$(command -v xtensa-esp32s3-elf-objdump || ls "$HOME"/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump 2>/dev/null | tail -1 || true)
 if [ -n "$OD" ]; then
     "$OD" -d "$OUT/nerd_core.o" > "$OUT/nerd_core.S"
-    echo "disassembly: $OUT/nerd_core.S ($(grep -c '^ *[0-9a-f]*:' "$OUT/nerd_core.S") instructions)"
+    # count only .text.* sections; objdump also "disassembles" .literal.* constant pools
+    N=$(awk '/Disassembly of section/{t=($4 ~ /^\.text/)} t && /^ *[0-9a-f]+:\t/{n++} END{print n+0}' "$OUT/nerd_core.S")
+    echo "disassembly: $OUT/nerd_core.S ($N instructions in .text)"
 fi
 "$V" --version | head -1 > "$OUT/VYB_VERSION"
 (cd components/vyb_nerd_core/prebuilt && sha256sum esp32s3/nerd_core.o > SHA256SUMS && cat SHA256SUMS)

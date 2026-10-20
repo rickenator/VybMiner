@@ -180,7 +180,7 @@ build-xtensa/vyb --target xtensa-esp32s3-elf -O3 -c nerd_core.o /path/to/VybMine
 ```
 
 Result for this project: `elf32-xtensa-le` object, 3 global symbols, no
-undefined symbols, 8 622 LX7 instructions.
+undefined symbols, 8 443 LX7 instructions (8 372 in `nm_sha256d_h7`).
 
 ### Known limits
 
@@ -245,5 +245,5 @@ MIT, see [LICENSE](LICENSE). NerdMiner_V2 is MIT-licensed work by **BitMaker**
 (BitMaker-hub) and contributors; its `nerdSHA256plus` is based on Blockstream
 Jade's SHA code, thanks to @LarryBitcoin. This is an independent
 re-implementation of that design; the upstream notice is reproduced in
-LICENSE. Vyb (Apache-2.0) and ESP-IDF (Apache-2.0) are build dependencies and
-are not vendored.
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Vyb (Apache-2.0) and ESP-IDF
+(Apache-2.0) are build dependencies and are not vendored.

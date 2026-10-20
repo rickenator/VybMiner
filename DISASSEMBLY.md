@@ -121,7 +121,7 @@ IRAM like upstream's `nerd_sha256d`:
 
 | | upstream `nerd_sha256d` (GCC, IRAM) | Vyb `nm_sha256d_h7` + `nm_scan` + `nm_selftest` |
 |---|---|---|
-| instructions | ~6.0 k (one function) | 8 622 total (≈8.4 k in `nm_sha256d_h7`) |
+| instructions | ~6.0 k (one function) | 8 443 total (8 372 in `nm_sha256d_h7`) |
 | rotates | 1098 `ssai`+`src` funnel shifts | 490 `ssr`+`srl` / `slli` pairs, 11 `src`, 0 `ssai` |
 | memory traffic | 16 `l8ui`, 32 `s8i` (byte-wise header/hash) | scalar `uint32_t` arguments (a2–a7, the rest on the stack); 1186 `l32i` / 413 `s32i`, mostly register spills |
 | early exit | 16-bit pre-filter `retw` paths | returns digest word 7; `nm_scan` applies the same 16-bit filter |
