@@ -1,9 +1,10 @@
 # DISASSEMBLY.md — what in `app0.bin` justifies the port's structure
 
-Secondary to the Vyb sources. Everything here comes from
-`/home/rick/esp32-teardown/partitions/app0.bin` (the active ota_0 slot, 3 MiB),
-read-only. Disassembly: `xtensa-esp32s3-elf-objdump` (esp-14.2.0) over the raw
-segments; scratch output in `../work/disasm/` (`irom.S`, `iram.S`, `xref.md`).
+Secondary to the Vyb sources. Everything here comes from the `app0.bin`
+partition (the active ota_0 slot, 3 MiB) read off a NerdMiner v2 board with
+`esptool read_flash`, read-only. Disassembly: `xtensa-esp32s3-elf-objdump`
+(esp-14.2.0) over the raw segments. The flash dump itself is not in this repo
+(it holds the owner's Wi-Fi credentials and payout address).
 
 ## Image layout (esptool image_info)
 
@@ -110,3 +111,23 @@ two-compression tail hash per nonce with the padding words folded to constants.
 | `checkValid` memcpy's `&target` (the pointer) and loops `uint8_t i >= 0` | utils.cpp | **fixed** to a real ≤ comparison (block-found detection) |
 | `hex()` maps lowercase via `& 0x0F` luck | utils.cpp | explicit decoder |
 | `"shares"` counts 32-bit-zero hashes, not pool-accepted shares | mining.cpp | kept (status line semantics) |
+
+## The port's ESP32-S3 core vs upstream's
+
+`esp32/components/vyb_nerd_core/prebuilt/esp32s3/nerd_core.S` is the
+disassembly of the object Vyb itself emits (`vyb --target xtensa-esp32s3-elf
+-O3`, Vyb branch `esp32-xtensa-target`, Espressif LLVM 18 backend), linked into
+IRAM like upstream's `nerd_sha256d`:
+
+| | upstream `nerd_sha256d` (GCC, IRAM) | Vyb `nm_sha256d_h7` + `nm_scan` + `nm_selftest` |
+|---|---|---|
+| instructions | ~6.0 k (one function) | 8 622 total (≈8.4 k in `nm_sha256d_h7`) |
+| rotates | 1098 `ssai`+`src` funnel shifts | 490 `ssr`+`srl` / `slli` pairs, 11 `src`, 0 `ssai` |
+| memory traffic | 16 `l8ui`, 32 `s8i` (byte-wise header/hash) | scalar `uint32_t` arguments (a2–a7, the rest on the stack); 1186 `l32i` / 413 `s32i`, mostly register spills |
+| early exit | 16-bit pre-filter `retw` paths | returns digest word 7; `nm_scan` applies the same 16-bit filter |
+
+Both compute the same thing: midstate once per job, then a two-compression
+tail hash per nonce with the padding words folded to constants. The gap is
+codegen (no rotate intrinsic in Vyb yet), not algorithm; see README "Known
+limits". Verified: genesis-block self-test on the device image in QEMU and
+byte-identical submits accepted by the re-hashing mock pool.
