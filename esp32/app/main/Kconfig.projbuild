@@ -1,0 +1,51 @@
+menu "VybMiner"
+
+    config VYBMINER_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "yourSSID"
+        help
+            Network to join. Leave as "yourSSID" to run the offline benchmark only.
+
+    config VYBMINER_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config VYBMINER_POOL
+        string "Stratum pool host"
+        default "public-pool.io"
+
+    config VYBMINER_PORT
+        int "Stratum pool port"
+        default 21496
+
+    config VYBMINER_BTC_ADDRESS
+        string "BTC payout address (btcString)"
+        default "yourBtcAddress"
+        help
+            Your own Bitcoin address. While it is "yourBtcAddress" the firmware
+            never connects to a pool and only runs the offline benchmark.
+
+    config VYBMINER_POOL_PASSWORD
+        string "Pool password"
+        default "x"
+
+    config VYBMINER_MINERS
+        int "Miner tasks (one per core is ideal)"
+        range 1 4
+        default 2
+
+    config VYBMINER_MONITOR_SECS
+        int "Seconds between status lines"
+        range 1 3600
+        default 5
+
+    config VYBMINER_QEMU_ETH
+        bool "Network over QEMU open_eth instead of Wi-Fi (emulator testing)"
+        default n
+        select ETH_USE_OPENETH
+        help
+            For `tools/qemu_e2e.sh`: Espressif's QEMU emulates no Wi-Fi radio, but
+            its OpenCores Ethernet (qemu -nic user,model=open_eth) gives the
+            firmware a real TCP/IP path to a mock pool on the host (10.0.2.2).
+
+endmenu

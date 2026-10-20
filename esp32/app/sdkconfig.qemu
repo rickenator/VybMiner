@@ -1,0 +1,9 @@
+# Overlay for tools/qemu_e2e.sh: Espressif QEMU (esp32s3 machine) with OpenCores
+# Ethernet; mine against tools/mock_pool.py on the host via QEMU user networking.
+# Placeholder worker name only -- the mock pool accepts anything.
+CONFIG_VYBMINER_QEMU_ETH=y
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_VYBMINER_POOL="10.0.2.2"
+CONFIG_VYBMINER_PORT=33333
+CONFIG_VYBMINER_BTC_ADDRESS="bc1qmockworkeraddress"
+CONFIG_VYBMINER_MONITOR_SECS=5

@@ -1,0 +1,6 @@
+# Run the Vyb hot path from IRAM, like upstream's IRAM_ATTR nerd_sha256d:
+# flash-cache misses would otherwise stall the nonce loop.
+[mapping:vyb_nerd_core]
+archive: libvyb_nerd_core.a
+entries:
+    nerd_core (noflash)
