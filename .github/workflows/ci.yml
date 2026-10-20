@@ -1,0 +1,100 @@
+name: ci
+
+# host:     build the pinned Vyb compiler (cached), run every Vyb + C-shell test,
+#           and both end-to-end runs against the localhost mock pool.
+# firmware: `idf.py build` of the ESP32-S3 firmware in Espressif's ESP-IDF image,
+#           linking the Vyb-compiled Xtensa object from the repo. Never flashes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Vyb with `--target` (freestanding cross-compile). Pinned by commit.
+  VYB_REPO: rickenator/Vyb
+  VYB_REF: VYB_REF_PLACEHOLDER
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build \
+            llvm-18-dev libclang-18-dev clang-18 catch2 libssl-dev python3
+
+      - name: Restore Vyb compiler
+        id: vyb-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/vyb
+          key: vyb-${{ runner.os }}-ubuntu24-${{ env.VYB_REF }}
+
+      - name: Build Vyb ${{ env.VYB_REF }}
+        if: steps.vyb-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/$VYB_REPO.git ~/vyb
+          cd ~/vyb && git checkout "$VYB_REF"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake -DVYB_USE_QT5=OFF -DVYB_BINDGEN_LIBCLANG=OFF
+          cmake --build build --target vyb --parallel "$(nproc)"
+          rm -rf build/CMakeFiles .git
+
+      - name: Vyb version
+        run: ~/vyb/build/vyb --version
+
+      - name: Tests (Vyb units, replay cross-check, C shell, Vyb core)
+        env:
+          VYB_STDLIB: /home/runner/vyb/stdlib
+        run: VYB=$HOME/vyb/build/vyb ./run_tests.sh
+
+      - name: End-to-end, pure-Vyb miner vs mock pool
+        env:
+          VYB_STDLIB: /home/runner/vyb/stdlib
+        run: VYB=$HOME/vyb/build/vyb tools/e2e_mock.sh test/fixtures/stratum_capture.log 10 vyb
+
+      - name: End-to-end, firmware C shell (host build) vs mock pool
+        env:
+          VYB_STDLIB: /home/runner/vyb/stdlib
+        run: VYB=$HOME/vyb/build/vyb tools/e2e_mock.sh test/fixtures/stratum_capture.log 10 shell
+
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container: espressif/idf:v5.4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the prebuilt Vyb object
+        run: |
+          cd esp32/components/vyb_nerd_core/prebuilt
+          sha256sum -c SHA256SUMS
+          python3 ../../../../tools/elf_syms.py esp32s3/nerd_core.o
+
+      - name: idf.py build (esp32s3)
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd esp32/app
+          idf.py set-target esp32s3
+          idf.py build
+          idf.py size
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vybminer-esp32s3-firmware
+          path: |
+            esp32/app/build/vybminer.bin
+            esp32/app/build/vybminer.elf
+            esp32/app/build/bootloader/bootloader.bin
+            esp32/app/build/partition_table/partition-table.bin
+            esp32/app/build/flash_args
