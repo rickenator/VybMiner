@@ -14,7 +14,7 @@
 #   NERDMINER_MONITOR_SECS status-line period (default 5; device: 1)
 #   NERDMINER_MINERS   number of interleaved miner tasks (default 2, like the S3)
 #   NERDMINER_REPLAY   offline: mine a mining.notify captured in a serial log
-#                      (e.g. the dump's boot_console.txt); never contacts a pool
+#                      (e.g. test/fixtures/stratum_capture.log); never contacts a pool
 
 import env::{env_get}
 import io::{open_read, read_all, close}

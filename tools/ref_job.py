@@ -4,7 +4,7 @@
 (extranonce2 = 1, as the device's first job) and prints it, so it can be
 diffed against the Vyb replay's "blockheader (nonce 0)" line.
 
-    python3 tools/ref_job.py ../boot_console.txt
+    python3 tools/ref_job.py test/fixtures/stratum_capture.log
 """
 import hashlib, json, sys, re
 log = open(sys.argv[1]).read().splitlines()

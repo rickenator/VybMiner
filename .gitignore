@@ -1,2 +1,11 @@
 target/
 *.ll
+esp32/host/build/
+esp32/app/build/
+esp32/app/sdkconfig
+esp32/app/sdkconfig.old
+esp32/app/managed_components/
+esp32/app/dependencies.lock
+config.json
+__pycache__/
+esp32/app/build-qemu/

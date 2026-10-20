@@ -2,11 +2,11 @@
 """Local stratum v1 mock for exercising nerdminer-vyb end to end, offline.
 
 Replays the subscribe reply + mining.notify captured in a serial log (the
-dump's boot_console.txt), sets a low difficulty so shares arrive quickly, and
+sanitized fixture test/fixtures/stratum_capture.log), sets a low difficulty so shares arrive quickly, and
 independently re-hashes every mining.submit to check it (extranonce2, ntime and
 nonce all have to be right for the share to meet the difficulty).
 
-    python3 tools/mock_pool.py ../boot_console.txt 3333 0.0005
+    python3 tools/mock_pool.py test/fixtures/stratum_capture.log 3333 0.0005
 """
 import hashlib, json, socket, sys, threading
 
