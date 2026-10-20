@@ -1,0 +1,50 @@
+# test_stratum.vyb -- parser / job-prep unit tests (no network).
+# Run:  $VYB test/test_stratum.vyb --module-path src
+
+import nerdminer::stratum
+import nerdminer::mining
+import nerdminer::json
+import nerdminer::hexutil
+
+check(name<String>, got<String>, want<String>)<Int> -> {
+    if (got == want) {
+        println("PASS " + name)
+        return 0
+    }
+    println("FAIL " + name + "\n  got  " + got + "\n  want " + want)
+    return 1
+}
+
+main()<Int> -> {
+    f<Int> = 0
+    sub<MiningSubscribe> = init_mining_subscribe()
+    parse_mining_subscribe("{\"id\":1,\"error\":null,\"result\":[[[\"mining.notify\",\"deadbeef\"]],\"0badc0de\",4]}", borrow(sub))
+    f = f + check("subscribe sub_details", sub.sub_details, "deadbeef")
+    f = f + check("subscribe extranonce1", sub.extranonce1, "0badc0de")
+    f = f + check("subscribe extranonce2_size", sub.extranonce2_size.to_string(), "4")
+
+    line<String> = "{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"j1\",\"00\",\"aa\",\"bb\",[\"01\",\"02\"],\"20000000\",\"1d00ffff\",\"5f5e1000\",true]}"
+    f = f + check("method notify", parse_mining_method(line).to_string(), StratumMethod::MINING_NOTIFY.to_string())
+    job<MiningJob> = empty_job()
+    parse_mining_notify(line, borrow(job))
+    br<Vec<String>> = job.merkle_branch
+    f = f + check("notify fields", job.job_id + "|" + job.nbits + "|" + job.ntime + "|" + br.len().to_string() + "|" + job.clean_jobs.to_string(),
+                  "j1|1d00ffff|5f5e1000|2|true")
+    f = f + check("method set_difficulty", parse_mining_method("{\"id\":null,\"method\":\"mining.set_difficulty\",\"params\":[512]}").to_string(),
+                  StratumMethod::MINING_SET_DIFFICULTY.to_string())
+    f = f + check("set_difficulty value", parse_mining_set_difficulty("{\"id\":null,\"method\":\"mining.set_difficulty\",\"params\":[0.00025]}", 1.0).to_string(), "0.00025")
+    f = f + check("result ok", parse_mining_method("{\"id\":2,\"error\":null,\"result\":true}").to_string(), StratumMethod::STRATUM_SUCCESS.to_string())
+    f = f + check("pool error", parse_mining_method("{\"id\":4,\"error\":[23,\"Low difficulty share\",null],\"result\":false}").to_string(),
+                  StratumMethod::STRATUM_PARSE_ERROR.to_string())
+
+    f = f + check("extranonce2 first", next_extranonce2(4, ""), "00000001")
+    f = f + check("extranonce2 decimal carry", next_extranonce2(4, "00000009"), "00000010")
+    t<Vec<Int>> = target_from_nbits("1d00ffff")
+    f = f + check("target(1d00ffff)", bytes_to_hex(view(t)), "00000000ffff0000000000000000000000000000000000000000000000000000")
+    t2<Vec<Int>> = target_from_nbits("17020093")
+    f = f + check("target(17020093)", bytes_to_hex(view(t2)), "0000000000000000000200930000000000000000000000000000000000000000")
+    f = f + check("nonce hex (Arduino HEX)", int_to_hex(446136297), "1a977fe9")
+
+    if (f == 0) { println("ALL STRATUM TESTS PASSED") }
+    return f
+}

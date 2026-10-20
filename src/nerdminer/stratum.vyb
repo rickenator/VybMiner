@@ -1,0 +1,354 @@
+# stratum.vyb -- Stratum v1 client (upstream: src/stratum.cpp / stratum.h,
+# plus the connection half of mining.cpp: checkPoolConnection).
+#
+# Wire format is kept byte-for-byte with Release-1.6.3 (the dump's boot console
+# shows these exact payloads):
+#   {"id": 1, "method": "mining.subscribe", "params": ["NerdMinerV2"]}
+#   {"params": ["<btc>", "<pass>"], "id": 2, "method": "mining.authorize"}
+#   {"id": 3, "method": "mining.suggest_difficulty", "params": [0.0001]}
+#   {"id": N, "method": "mining.submit", "params": ["<btc>","<job>","<en2>","<ntime>","<nonce hex>"]}
+#
+# Upstream WiFiClient -> Vyb `network` sockets. Arduino's readStringUntil('\n')
+# -> a line buffer fed by socket_recv with a short SO_RCVTIMEO, so the
+# cooperative host loop can keep hashing between pool messages.
+
+import network::{socket_open, socket_connect, socket_close, socket_send, socket_recv,
+                 socket_set_timeout, socket_resolve, socket_error_code, socket_error_message, Socket}
+import time::{time_mono_millis, sleep_ms}
+import nerdminer::json
+import nerdminer::hexutil
+
+# stratum_method (stratum.h)
+share(all)
+enum StratumMethod {
+    STRATUM_SUCCESS = 0
+    STRATUM_UNKNOWN = 1
+    STRATUM_PARSE_ERROR = 2
+    MINING_NOTIFY = 3
+    MINING_SET_DIFFICULTY = 4
+}
+
+EAGAIN<Int> = 11
+RX_POLL_MS<Int> = 2
+
+# The pool connection. `server_ip` caches the first DNS answer exactly like
+# upstream's `IPAddress serverIP(1,1,1,1)` sentinel.
+share(all)
+struct Stratum {
+    fd<Int>,
+    connected<Bool>,
+    rxbuf<String>,
+    next_id<Int>,
+    server_ip<String>,
+    last_tx_ms<Int>
+}
+
+# mining_subscribe (stratum.h). wName/wPass are char[80]/char[20] upstream.
+share(all)
+struct MiningSubscribe {
+    sub_details<String>,
+    extranonce1<String>,
+    extranonce2<String>,
+    extranonce2_size<Int>,
+    wName<String>,
+    wPass<String>
+}
+
+# mining_job (stratum.h). merkle_branch was a JsonArray view into the shared
+# StaticJsonDocument; here it owns its hex strings.
+share(all)
+struct MiningJob {
+    job_id<String>,
+    prev_block_hash<String>,
+    coinb1<String>,
+    coinb2<String>,
+    nbits<String>,
+    merkle_branch<Vec<String>>,
+    version<String>,
+    ntime<String>,
+    clean_jobs<Bool>
+}
+
+share(all)
+new_stratum()<Stratum> -> {
+    return Stratum { fd = -1, connected = false, rxbuf = "", next_id = 1, server_ip = "", last_tx_ms = 0 }
+}
+
+share(all)
+init_mining_subscribe()<MiningSubscribe> -> {
+    return MiningSubscribe { sub_details = "", extranonce1 = "", extranonce2 = "", extranonce2_size = 0, wName = "", wPass = "" }
+}
+
+share(all)
+empty_job()<MiningJob> -> {
+    return MiningJob { job_id = "", prev_block_hash = "", coinb1 = "", coinb2 = "", nbits = "",
+                       merkle_branch = Vec(), version = "", ntime = "", clean_jobs = false }
+}
+
+# getNextId (stratum.cpp): wraps at ULONG_MAX (32-bit on Xtensa).
+next_id(c<their<Stratum>>)<Int> -> {
+    if (c.next_id >= 4294967295) { c.next_id = 1 }
+    else { c.next_id = c.next_id + 1 }
+    return c.next_id
+}
+
+share(all)
+stratum_close(c<their<Stratum>>)<Int> -> {
+    if (c.fd >= 0) { socket_close(c.fd) }
+    c.fd = -1
+    c.connected = false
+    c.rxbuf = ""
+    return 0
+}
+
+# checkPoolConnection (mining.cpp).
+share(all)
+stratum_connect(c<their<Stratum>>, host<String>, port<Int>)<Bool> -> {
+    if (c.connected) { return true }
+    println("Client not connected, trying to connect...")
+    if (c.server_ip.len() == 0) {
+        c.server_ip = socket_resolve(host) else ""
+        println("Resolved DNS and save ip (first time) got: " + c.server_ip)
+    }
+    if (c.server_ip.len() == 0) { return false }
+    fd<Int> = socket_open(Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP) else -1
+    if (fd < 0) { return false }
+    ok<Bool> = socket_connect(fd, c.server_ip, port) else false
+    if (!ok) {
+        println("Imposible to connect to : " + host)
+        socket_close(fd)
+        c.server_ip = socket_resolve(host) else ""
+        println("Resolved DNS got: " + c.server_ip)
+        sleep_ms(1000)
+        return false
+    }
+    socket_set_timeout(fd, RX_POLL_MS)
+    c.fd = fd
+    c.connected = true
+    c.rxbuf = ""
+    return true
+}
+
+share(all)
+stratum_send(c<their<Stratum>>, payload<String>)<Bool> -> {
+    if (!c.connected) { return false }
+    n<Int> = socket_send(c.fd, payload) else -1
+    if (n < 0) {
+        println("  send failed: " + socket_error_message())
+        stratum_close(c)
+        return false
+    }
+    c.last_tx_ms = time_mono_millis()
+    return true
+}
+
+# Pull whatever the socket has (one SO_RCVTIMEO slice) into rxbuf.
+pump(c<their<Stratum>>)<Int> -> {
+    if (!c.connected) { return -1 }
+    match (socket_recv(c.fd, 4096)) {
+        chunk -> {
+            if (chunk.len() == 0) {
+                println("  pool closed the connection")
+                stratum_close(c)
+                return -1
+            }
+            c.rxbuf = c.rxbuf + chunk
+            return chunk.len()
+        }
+        ? -> {
+            if (socket_error_code() != EAGAIN) {
+                println("  recv error: " + socket_error_message())
+                stratum_close(c)
+                return -1
+            }
+        }
+    }
+    return 0
+}
+
+# Take one complete '\n'-terminated line out of rxbuf, if there is one.
+take_line(c<their<Stratum>>)<String?> -> {
+    buf<String> = c.rxbuf
+    nl<Int> = buf.index_of("\n")
+    if (nl < 0) { return String?() }
+    line<String> = buf.substring(0, nl)
+    c.rxbuf = buf.substring(nl + 1, buf.len())
+    return String?(line.trim())
+}
+
+# Arduino client.available() + readStringUntil('\n'): a line if one arrives
+# within `wait_ms` (0 = just poll once).
+share(all)
+stratum_read_line(c<their<Stratum>>, wait_ms<Int>)<String?> -> {
+    deadline<Int> = time_mono_millis() + wait_ms
+    while (true) {
+        match (take_line(c)) {
+            l -> { return String?(l) }
+            ? -> { }
+        }
+        if (pump(c) < 0) { return String?() }
+        if (time_mono_millis() >= deadline) {
+            match (take_line(c)) {
+                l -> { return String?(l) }
+                ? -> { return String?() }
+            }
+        }
+    }
+    return String?()
+}
+
+# checkError (stratum.cpp): a non-empty "error" member is a pool error.
+check_error(line<String>)<Bool> -> {
+    match (json_value(line, "error")) {
+        e -> {
+            if (json_is_null(e)) { return false }
+            items<Vec<String>> = json_items(e)
+            if (items.len() == 0) { return false }
+            println("ERROR: " + json_at(e, 0) + " | reason: " + json_str(json_at(e, 1)))
+            return true
+        }
+        ? -> { return false }
+    }
+    return false
+}
+
+# STEP 1: SUBSCRIBE (tx_mining_subscribe + parse_mining_subscribe).
+share(all)
+tx_mining_subscribe(c<their<Stratum>>, sub<their<MiningSubscribe>>)<Bool> -> {
+    c.next_id = 1
+    payload<String> = "{\"id\": " + c.next_id.to_string() + ", \"method\": \"mining.subscribe\", \"params\": [\"NerdMinerV2\"]}\n"
+    println("[WORKER] ==> Mining subscribe")
+    print("  Sending  : ")
+    println(payload)
+    if (!stratum_send(c, payload)) { return false }
+    line<String> = stratum_read_line(c, 5000) else ""
+    if (!parse_mining_subscribe(line, sub)) { return false }
+    println("    sub_details: " + sub.sub_details)
+    println("    extranonce1: " + sub.extranonce1)
+    println("    extranonce2_size: " + sub.extranonce2_size.to_string())
+    if (sub.extranonce1.len() == 0) {
+        println("[WORKER] >>>>>>>>> Work aborted")
+        println("extranonce1 length: 0")
+        return false
+    }
+    return true
+}
+
+share(all)
+parse_mining_subscribe(line<String>, sub<their<MiningSubscribe>>)<Bool> -> {
+    if (line.len() == 0) { return false }
+    println("  Receiving: " + line)
+    if (check_error(line)) { return false }
+    match (json_value(line, "result")) {
+        r -> {
+            sub.sub_details = json_str(json_at(json_at(json_at(r, 0), 0), 1))
+            sub.extranonce1 = json_str(json_at(r, 1))
+            sub.extranonce2_size = json_int(json_at(r, 2))
+            return true
+        }
+        ? -> { return false }
+    }
+    return false
+}
+
+# STEP 2: AUTHORIZE. Upstream does not wait for / check the reply.
+share(all)
+tx_mining_auth(c<their<Stratum>>, user<String>, password<String>)<Bool> -> {
+    id<Int> = next_id(c)
+    payload<String> = "{\"params\": [\"" + user + "\", \"" + password + "\"], \"id\": " + id.to_string() + ", \"method\": \"mining.authorize\"}\n"
+    println("[WORKER] ==> Autorize work")
+    print("  Sending  : ")
+    println(payload)
+    return stratum_send(c, payload)
+}
+
+# STEP 3 (and keep-alive): suggest a pool difficulty (upstream "%.10g").
+share(all)
+tx_suggest_difficulty(c<their<Stratum>>, difficulty<Float>)<Bool> -> {
+    id<Int> = next_id(c)
+    payload<String> = "{\"id\": " + id.to_string() + ", \"method\": \"mining.suggest_difficulty\", \"params\": [" + difficulty.to_string() + "]}\n"
+    print("  Sending  : ")
+    print(payload)
+    return stratum_send(c, payload)
+}
+
+share(all)
+parse_mining_method(line<String>)<Int> -> {
+    if (line.len() == 0) { return StratumMethod::STRATUM_PARSE_ERROR }
+    println("  Receiving: " + line)
+    if (line.char_at(0) != 123) { return StratumMethod::STRATUM_PARSE_ERROR }
+    if (check_error(line)) { return StratumMethod::STRATUM_PARSE_ERROR }
+    match (json_value(line, "method")) {
+        m -> {
+            name<String> = json_str(m)
+            if (name == "mining.notify") { return StratumMethod::MINING_NOTIFY }
+            if (name == "mining.set_difficulty") { return StratumMethod::MINING_SET_DIFFICULTY }
+            return StratumMethod::STRATUM_UNKNOWN
+        }
+        ? -> {
+            # "error":null means success
+            e<String> = json_value(line, "error") else "null"
+            if (json_is_null(e)) { return StratumMethod::STRATUM_SUCCESS }
+            return StratumMethod::STRATUM_UNKNOWN
+        }
+    }
+    return StratumMethod::STRATUM_UNKNOWN
+}
+
+share(all)
+parse_mining_notify(line<String>, job<their<MiningJob>>)<Bool> -> {
+    println("    Parsing Method [MINING NOTIFY]")
+    match (json_value(line, "params")) {
+        p -> {
+            items<Vec<String>> = json_items(p)
+            if (items.len() < 9) { return false }
+            job.job_id = json_str(items.get(0))
+            job.prev_block_hash = json_str(items.get(1))
+            job.coinb1 = json_str(items.get(2))
+            job.coinb2 = json_str(items.get(3))
+            branch<Vec<String>> = Vec()
+            raw_branch<Vec<String>> = json_items(items.get(4))
+            nb<Int> = raw_branch.len()
+            if (nb > 0) {
+                for (k in 0..nb-1) { branch.push(json_str(raw_branch.get(k))) }
+            }
+            job.merkle_branch = branch
+            job.version = json_str(items.get(5))
+            job.nbits = json_str(items.get(6))
+            job.ntime = json_str(items.get(7))
+            job.clean_jobs = json_bool(items.get(8))
+        }
+        ? -> { return false }
+    }
+    if (check_error(line)) {
+        println("[WORKER] >>>>>>>>> Work aborted")
+        return false
+    }
+    return true
+}
+
+# Returns the new difficulty, or `current` if the line is malformed.
+share(all)
+parse_mining_set_difficulty(line<String>, current<Float>)<Float> -> {
+    println("    Parsing Method [SET DIFFICULTY]")
+    match (json_value(line, "params")) {
+        p -> {
+            d<Float> = json_float(json_at(p, 0))
+            println("    difficulty: " + d.to_string())
+            return d
+        }
+        ? -> { return current }
+    }
+    return current
+}
+
+share(all)
+tx_mining_submit(c<their<Stratum>>, worker<MiningSubscribe>, job<MiningJob>, nonce<Int>)<Bool> -> {
+    id<Int> = next_id(c)
+    payload<String> = "{\"id\": " + id.to_string() + ", \"method\": \"mining.submit\", \"params\": [\"" +
+        worker.wName + "\",\"" + job.job_id + "\",\"" + worker.extranonce2 + "\",\"" + job.ntime + "\",\"" +
+        int_to_hex(nonce) + "\"]}\n"
+    print("  Sending  : ")
+    print(payload)
+    return stratum_send(c, payload)
+}

@@ -1,0 +1,125 @@
+# config.vyb -- miner settings (upstream: drivers/storage/storage.h TSettings,
+# drivers/storage/nvMemory.cpp loadConfig/saveConfig, wManager.cpp).
+#
+# On the device, WiFiManager's captive portal ("NerdMinerAP" / "MineYourCoins")
+# collects pool + wallet and nvMemory writes them to SPIFFS /config.json with
+# the keys below. This dump's /config.json is exactly that shape. The host port
+# reads the same file (path from argv / NERDMINER_CONFIG), so a config pulled off
+# a board drops straight in. Wi-Fi credentials are deliberately NOT part of this
+# file -- on the ESP32 they live in NVS (nvs.net80211), and the host uses the
+# OS network stack.
+
+import io::{open_read, read_all, close}
+import env::{env_get}
+
+# --- upstream defaults (storage.h, Release-1.6.3) ---------------------------
+DEFAULT_SSID<String> = "NerdMinerAP"
+DEFAULT_POOLURL<String> = "public-pool.io"
+DEFAULT_POOLPASS<String> = "x"
+DEFAULT_WALLETID<String> = "yourBtcAddress"
+DEFAULT_POOLPORT<Int> = 21496
+DEFAULT_TIMEZONE<Int> = 2
+JSON_CONFIG_FILE<String> = "/config.json"
+
+# The SPIFFS /config.json document, field names == JSON keys
+# (JSON_SPIFFS_KEY_* in storage.h), so Vyb's built-in JSON round-trip
+# (`SpiffsConfig::from_string`, `.to_string()`) replaces ArduinoJson.
+share(all)
+struct SpiffsConfig {
+    poolString<String>,
+    portNumber<Int>,
+    poolPassword<String>,
+    btcString<String>,
+    gmtZone<Int>,
+    saveStatsToNVS<Bool>
+}
+
+# Upstream TSettings minus the Wi-Fi pair.
+share(all)
+struct Settings {
+    pool_address<String>,
+    pool_port<Int>,
+    pool_password<String>,
+    btc_wallet<String>,
+    timezone<Int>,
+    save_stats<Bool>
+}
+
+share(all)
+default_settings()<Settings> -> {
+    return Settings {
+        pool_address = DEFAULT_POOLURL,
+        pool_port = DEFAULT_POOLPORT,
+        pool_password = DEFAULT_POOLPASS,
+        btc_wallet = DEFAULT_WALLETID,
+        timezone = DEFAULT_TIMEZONE,
+        save_stats = false
+    }
+}
+
+read_text(path<String>)<String?> -> {
+    match (open_read(path)) {
+        f -> {
+            txt<String> = read_all(f) else ""
+            close(f)
+            return String?(txt)
+        }
+        ? -> { return String?() }
+    }
+    return String?()
+}
+
+# nvMemory::loadConfig -- "SPIFS: Loading config file" + pretty dump.
+share(all)
+load_config(path<String>)<Settings> -> {
+    s<Settings> = default_settings()
+    match (read_text(path)) {
+        txt -> {
+            println("SPIFS: Loading config file")
+            cfg<SpiffsConfig> = SpiffsConfig::from_string(txt)
+            println(cfg.to_string())
+            if (cfg.poolString.len() > 0) { s.pool_address = cfg.poolString }
+            if (cfg.portNumber > 0) { s.pool_port = cfg.portNumber }
+            if (cfg.poolPassword.len() > 0) { s.pool_password = cfg.poolPassword }
+            if (cfg.btcString.len() > 0) { s.btc_wallet = cfg.btcString }
+            s.timezone = cfg.gmtZone
+            s.save_stats = cfg.saveStatsToNVS
+        }
+        ? -> {
+            println("SPIFS: No config file at " + path + " -- using defaults")
+        }
+    }
+    return apply_env(s)
+}
+
+# Host-only: environment overrides, so a wallet never has to be committed.
+apply_env(s<Settings>)<Settings> -> {
+    r<Settings> = s
+    match (env_get("NERDMINER_POOL")) { v -> { r.pool_address = v } ? -> { } }
+    match (env_get("NERDMINER_PORT")) { v -> { r.pool_port = port_from(v, r.pool_port) } ? -> { } }
+    match (env_get("NERDMINER_POOLPASS")) { v -> { r.pool_password = v } ? -> { } }
+    match (env_get("NERDMINER_BTC")) { v -> { r.btc_wallet = v } ? -> { } }
+    return r
+}
+
+port_from(v<String>, fallback<Int>)<Int> -> {
+    p<Int> = 0
+    for (i in 0..v.len()-1) {
+        c<Int> = v.char_at(i)
+        if (c < 48 || c > 57) { return fallback }
+        p = p * 10 + (c - 48)
+    }
+    if (p <= 0 || p > 65535) { return fallback }
+    return p
+}
+
+# The serial echo from wManager.cpp after Wi-Fi comes up.
+share(all)
+print_settings(s<Settings>)<Int> -> {
+    println("PoolString: " + s.pool_address)
+    println("portNumber: " + s.pool_port.to_string())
+    println("poolPassword: " + s.pool_password)
+    println("btcString: " + s.btc_wallet)
+    println("TimeZone fromUTC: " + s.timezone.to_string())
+    return 0
+}

@@ -1,0 +1,60 @@
+# monitor.vyb -- counters + the serial status line (upstream: mining.cpp
+# runMonitor / restoreStat / saveStat and the display drivers' printf).
+#
+# On the board this task also redraws the 320x170 ST7789 T-Display screen
+# (drivers/displays/tDisplayDriver.cpp), blinks the RGB LED and reads BTC
+# price / block height from api.blockchain.com + mempool.space. Those are
+# hardware/UI concerns: see hal.vyb.
+
+import time::{time_mono_millis}
+
+share(all)
+struct Stats {
+    templates<Int>,
+    hashes<Int>,
+    shares<Int>,
+    valids<Int>,
+    submits<Int>,
+    best_diff<Float>,
+    start_ms<Int>,
+    last_report_ms<Int>,
+    last_report_hashes<Int>
+}
+
+share(all)
+new_stats()<Stats> -> {
+    now<Int> = time_mono_millis()
+    return Stats { templates = 0, hashes = 0, shares = 0, valids = 0, submits = 0, best_diff = 0.0,
+                   start_ms = now, last_report_ms = now, last_report_hashes = 0 }
+}
+
+# Two-decimal fixed formatting for the status line.
+fmt2(v<Float>)<String> -> {
+    whole<Int> = v as Int
+    frac<Int> = ((v - (whole as Float)) * 100.0 + 0.5) as Int
+    if (frac >= 100) {
+        whole = whole + 1
+        frac = frac - 100
+    }
+    if (frac < 10) { return whole.to_string() + ".0" + frac.to_string() }
+    return whole.to_string() + "." + frac.to_string()
+}
+
+# ">>> Completed %s share(s), %s Khashes, avg. hashrate %s KH/s" -- the exact
+# line the dump's boot console shows (noDisplay/tDisplay drivers), plus the
+# best-difficulty figure the TFT shows.
+share(all)
+report(st<their<Stats>>)<Int> -> {
+    now<Int> = time_mono_millis()
+    elapsed<Int> = now - st.last_report_ms
+    if (elapsed <= 0) { elapsed = 1 }
+    dh<Int> = st.hashes - st.last_report_hashes
+    khs<Float> = (dh as Float) / (elapsed as Float)
+    println(">>> Completed " + st.shares.to_string() + " share(s), " + (st.hashes / 1000).to_string() +
+            " Khashes, avg. hashrate " + fmt2(khs) + " KH/s  | best diff " + st.best_diff.to_string() +
+            " | templates " + st.templates.to_string() + " | submits " + st.submits.to_string() +
+            " | valid blocks " + st.valids.to_string())
+    st.last_report_ms = now
+    st.last_report_hashes = st.hashes
+    return 0
+}

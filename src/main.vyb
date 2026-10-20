@@ -1,0 +1,332 @@
+# main.vyb -- NerdMiner v2 (Release-1.6.3, env NerminerV2) reconstructed in Vyb.
+#
+# Upstream entry: src/NerdMinerV2.ino.cpp setup() starts FreeRTOS tasks
+#   Monitor (core 1, prio 4)  -> runMonitor      -> monitor.vyb / report()
+#   Stratum (core 1, prio 3)  -> runStratumWorker -> worker_loop() below
+#   Miner0 / Miner1 (prio 1)  -> runMiner(0/1)    -> mine_slice() odd/even nonces
+# The host build runs the same four roles as one cooperative loop: drain pool
+# messages, hash a slice of nonces for each "miner task", report, repeat.
+#
+# Environment (Vyb has no argv primitive yet):
+#   NERDMINER_CONFIG   path to a SPIFFS-style config.json  (default ./config.json)
+#   NERDMINER_BTC / NERDMINER_POOL / NERDMINER_PORT / NERDMINER_POOLPASS  overrides
+#   NERDMINER_RUN_SECS stop after N seconds (default 0 = forever)
+#   NERDMINER_MONITOR_SECS status-line period (default 5; device: 1)
+#   NERDMINER_MINERS   number of interleaved miner tasks (default 2, like the S3)
+#   NERDMINER_REPLAY   offline: mine a mining.notify captured in a serial log
+#                      (e.g. the dump's boot_console.txt); never contacts a pool
+
+import env::{env_get}
+import io::{open_read, read_all, close}
+import time::{time_mono_millis, sleep_ms}
+import nerdminer::config
+import nerdminer::stratum
+import nerdminer::mining
+import nerdminer::monitor
+import nerdminer::hal
+import nerdminer::hexutil
+import nerdminer::json
+
+SLICE<Int> = 131072
+
+env_int(name<String>, fallback<Int>)<Int> -> {
+    match (env_get(name)) {
+        v -> {
+            if (v.len() == 0) { return fallback }
+            n<Int> = 0
+            for (i in 0..v.len()-1) {
+                c<Int> = v.char_at(i)
+                if (c < 48 || c > 57) { return fallback }
+                n = n * 10 + (c - 48)
+            }
+            return n
+        }
+        ? -> { return fallback }
+    }
+    return fallback
+}
+
+# Everything runMiner does after the 16-bit pre-filter hits.
+handle_candidate(c<their<Stratum>>, st<their<Stats>>, worker<MiningSubscribe>, job<MiningJob>,
+                 m<their<MinerData const>>, miner_id<Int>, nonce<Int>, online<Bool>)<Bool> -> {
+    hash<Vec<Int>> = hash_nonce(m, nonce)
+    diff<Float> = diff_from_target(view(hash))
+    if (diff > st.best_diff) { st.best_diff = diff }
+    if (diff > m.pool_difficulty) {
+        if (online) {
+            tx_mining_submit(c, worker, job, nonce)
+            st.submits = st.submits + 1
+        }
+        else {
+            println("  [replay] would submit nonce " + int_to_hex(nonce) + " (job " + job.job_id + ")")
+        }
+        println("   - Current diff share: " + diff.to_string())
+        println("   - Current pool diff : " + m.pool_difficulty.to_string())
+        println("   - TX SHARE: " + bytes_to_hex(view(hash)))
+    }
+    # 32-bit share: hash[28..31] all zero
+    if (hash.get(31) != 0 || hash.get(30) != 0 || hash.get(29) != 0 || hash.get(28) != 0) { return false }
+    st.shares = st.shares + 1
+    tgt<Vec<Int>> = m.target
+    if (check_valid(view(hash), view(tgt))) {
+        println("[WORKER] " + miner_id.to_string() + " CONGRATULATIONS! Valid block found with nonce: " +
+                nonce.to_string() + " | 0x" + int_to_hex(nonce))
+        st.valids = st.valids + 1
+        return true
+    }
+    return false
+}
+
+# One pass of every miner task over its next slice. Returns false once all
+# tasks have run out of nonces (upstream: "nonce > TARGET_NONCE" -> wait).
+mine_round(c<their<Stratum>>, st<their<Stats>>, worker<MiningSubscribe>, job<MiningJob>,
+           m<their<MinerData const>>, nonces<their<Vec<Int>>>, miners<Int>, online<Bool>)<Bool> -> {
+    active<Bool> = false
+    for (id in 0..miners-1) {
+        start<Int> = nonces.get(id)
+        if (start <= MiningConst::TARGET_NONCE) {
+            active = true
+            s<Slice> = mine_slice(m, start, SLICE, miners, MiningConst::TARGET_NONCE)
+            st.hashes = st.hashes + s.hashes
+            nonces.set(id, s.next_nonce)
+            if (s.hit_nonce >= 0) {
+                if (handle_candidate(c, st, worker, job, m, id, s.hit_nonce, online)) {
+                    nonces.set(id, MiningConst::TARGET_NONCE + 1)   # wait for new job
+                }
+            }
+        }
+    }
+    return active
+}
+
+reset_nonces(miners<Int>)<Vec<Int>> -> {
+    v<Vec<Int>> = Vec()
+    for (id in 0..miners-1) { v.push(MiningConst::TARGET_NONCE - MiningConst::MAX_NONCE + id) }
+    return v
+}
+
+# runStratumWorker + runMiner + runMonitor, cooperatively.
+worker_loop(s<Settings>, run_secs<Int>, monitor_secs<Int>, miners<Int>)<Int> -> {
+    println("")
+    println("[WORKER] Started. Running (Stratum) on host loop")
+    for (id in 0..miners-1) { println("[MINER]  " + id.to_string() + "  Started runMiner Task!") }
+    c<Stratum> = new_stratum()
+    worker<MiningSubscribe> = init_mining_subscribe()
+    job<MiningJob> = empty_job()
+    m<MinerData> = empty_miner()
+    st<Stats> = new_stats()
+    subscribed<Bool> = false
+    pool_diff<Float> = default_difficulty()
+    nonces<Vec<Int>> = reset_nonces(miners)
+    t_start<Int> = time_mono_millis()
+    last_report<Int> = t_start
+    zero_hash_since<Int> = 0
+    hashes_at_check<Int> = 0
+
+    while (run_secs == 0 || time_mono_millis() - t_start < run_secs * 1000) {
+        if (!c.connected) {
+            subscribed = false
+            m.in_run = false
+            if (!stratum_connect(borrow(c), s.pool_address, s.pool_port)) {
+                # upstream: random 1..120 s back-off
+                backoff<Int> = 1 + (time_mono_millis() % 120)
+                println("  pool unreachable, retrying in " + backoff.to_string() + " s")
+                sleep_ms(backoff * 1000)
+                continue
+            }
+        }
+
+        if (!subscribed) {
+            m.in_run = false
+            worker = init_mining_subscribe()
+            if (!tx_mining_subscribe(borrow(c), borrow(worker))) {
+                stratum_close(borrow(c))
+                continue
+            }
+            worker.wName = s.btc_wallet
+            worker.wPass = s.pool_password
+            tx_mining_auth(borrow(c), worker.wName, worker.wPass)
+            tx_suggest_difficulty(borrow(c), default_difficulty())
+            subscribed = true
+        }
+
+        # checkPoolInactivity(KEEPALIVE_TIME_ms, POOLINACTIVITY_TIME_ms)
+        now<Int> = time_mono_millis()
+        if (now - c.last_tx_ms > MiningConst::KEEPALIVE_TIME_ms) {
+            println("  Sending  : KeepAlive suggest_difficulty")
+            tx_suggest_difficulty(borrow(c), default_difficulty())
+        }
+        if (st.hashes == hashes_at_check) {
+            if (zero_hash_since == 0) { zero_hash_since = now }
+            if (now - zero_hash_since > MiningConst::POOLINACTIVITY_TIME_ms) {
+                println("  Detected more than 2 min without data form stratum server. Closing socket and reopening...")
+                stratum_close(borrow(c))
+                zero_hash_since = 0
+                continue
+            }
+        }
+        else { zero_hash_since = 0 }
+        hashes_at_check = st.hashes
+
+        # Read pending messages from pool
+        wait<Int> = 0
+        if (!m.in_run) { wait = 200 }
+        draining<Bool> = true
+        while (draining) {
+            match (stratum_read_line(borrow(c), wait)) {
+                line -> {
+                    wait = 0
+                    println("  Received message from pool")
+                    method<Int> = parse_mining_method(line)
+                    if (method == StratumMethod::MINING_NOTIFY) {
+                        if (parse_mining_notify(line, borrow(job))) {
+                            st.templates = st.templates + 1
+                            if (m.in_run) { println("MINER WORK ABORTED >> waiting new job") }
+                            m = calculate_mining_data(borrow(worker), job)
+                            m.pool_difficulty = pool_diff
+                            m.in_run = true
+                            nonces = reset_nonces(miners)
+                            println(">>> STARTING TO HASH NONCES")
+                        }
+                    }
+                    if (method == StratumMethod::MINING_SET_DIFFICULTY) {
+                        pool_diff = parse_mining_set_difficulty(line, pool_diff)
+                        m.pool_difficulty = pool_diff
+                    }
+                    if (method == StratumMethod::STRATUM_SUCCESS) { println("  Parsed JSON: Success") }
+                    if (method == StratumMethod::STRATUM_PARSE_ERROR) { println("  Parsed JSON: error on JSON") }
+                    if (method == StratumMethod::STRATUM_UNKNOWN) { println("  Parsed JSON: unknown") }
+                }
+                ? -> { draining = false }
+            }
+        }
+
+        if (m.in_run && c.connected) {
+            if (!mine_round(borrow(c), borrow(st), worker, job, view(m), borrow(nonces), miners, true)) {
+                m.in_run = false
+                println(">>> Finished job waiting new data from pool")
+            }
+            watchdog_feed()
+        }
+
+        if (time_mono_millis() - last_report >= monitor_secs * 1000) {
+            if (st.hashes == st.last_report_hashes) {
+                println(">>> [i] Miner: newJob>false / inRun>" + m.in_run.to_string() + ") - Client: connected>" +
+                        c.connected.to_string() + " / subscribed>" + subscribed.to_string() + " / wificonnected>true")
+            }
+            report(borrow(st))
+            last_report = time_mono_millis()
+        }
+    }
+    if (time_mono_millis() - last_report >= 500) { report(borrow(st)) }
+    stratum_close(borrow(c))
+    return 0
+}
+
+# --- offline replay of a captured job -------------------------------------
+
+slurp(path<String>)<String> -> {
+    match (open_read(path)) {
+        f -> {
+            t<String> = read_all(f) else ""
+            close(f)
+            return t
+        }
+        ? -> { return "" }
+    }
+    return ""
+}
+
+# Find the first JSON line in a serial log whose "method" (or "result") matches.
+find_json_line(log<String>, needle<String>)<String> -> {
+    lines<Vec<String>> = log.split("\n")
+    n<Int> = lines.len()
+    for (i in 0..n-1) {
+        l<String> = lines.get(i).trim()
+        if (l.contains(needle)) {
+            k<Int> = l.index_of("{")
+            if (k >= 0) { return l.substring(k, l.len()) }
+        }
+    }
+    return ""
+}
+
+replay(path<String>, run_secs<Int>, monitor_secs<Int>, miners<Int>)<Int> -> {
+    log<String> = slurp(path)
+    if (log.len() == 0) {
+        println("replay: cannot read " + path)
+        return 2
+    }
+    sub_line<String> = find_json_line(log, "\"result\":[[[\"mining.notify\"")
+    notify_line<String> = find_json_line(log, "\"method\":\"mining.notify\"")
+    diff_line<String> = find_json_line(log, "\"method\":\"mining.set_difficulty\"")
+    if (sub_line.len() == 0 || notify_line.len() == 0) {
+        println("replay: no subscribe reply / mining.notify found in " + path)
+        return 2
+    }
+    worker<MiningSubscribe> = init_mining_subscribe()
+    parse_mining_subscribe(sub_line, borrow(worker))
+    job<MiningJob> = empty_job()
+    if (!parse_mining_notify(notify_line, borrow(job))) {
+        println("replay: could not parse mining.notify")
+        return 2
+    }
+    pool_diff<Float> = default_difficulty()
+    if (diff_line.len() > 0) { pool_diff = parse_mining_set_difficulty(diff_line, pool_diff) }
+    m<MinerData> = calculate_mining_data(borrow(worker), job)
+    m.pool_difficulty = pool_diff
+    hdr<Vec<Int>> = m.header
+    println("    blockheader (nonce 0): " + bytes_to_hex(view(hdr)))
+    println(">>> STARTING TO HASH NONCES (offline replay, nothing is sent)")
+    c<Stratum> = new_stratum()
+    st<Stats> = new_stats()
+    nonces<Vec<Int>> = reset_nonces(miners)
+    t_start<Int> = time_mono_millis()
+    last_report<Int> = t_start
+    secs<Int> = run_secs
+    if (secs == 0) { secs = 10 }
+    while (time_mono_millis() - t_start < secs * 1000) {
+        if (!mine_round(borrow(c), borrow(st), worker, job, view(m), borrow(nonces), miners, false)) {
+            println(">>> Finished job waiting new data from pool")
+            break
+        }
+        if (time_mono_millis() - last_report >= monitor_secs * 1000) {
+            report(borrow(st))
+            last_report = time_mono_millis()
+        }
+    }
+    if (time_mono_millis() - last_report >= 500) { report(borrow(st)) }
+    return 0
+}
+
+main()<Int> -> {
+    println("NerdMiner v2 starting......")
+    display_init()
+    display_draw_loading()
+    led_status("waitingConfig")
+
+    run_secs<Int> = env_int("NERDMINER_RUN_SECS", 0)
+    monitor_secs<Int> = env_int("NERDMINER_MONITOR_SECS", 5)
+    miners<Int> = env_int("NERDMINER_MINERS", 2)
+    if (miners < 1) { miners = 1 }
+    if (monitor_secs < 1) { monitor_secs = 1 }
+
+    replay_path<String> = env_get("NERDMINER_REPLAY") else ""
+    if (replay_path.len() > 0) {
+        return replay(replay_path, run_secs, monitor_secs, miners)
+    }
+
+    cfg_path<String> = env_get("NERDMINER_CONFIG") else "config.json"
+    println("SPIFS: Mounting File System...")
+    s<Settings> = load_config(cfg_path)
+    if (s.btc_wallet == "yourBtcAddress" || s.btc_wallet.len() == 0) {
+        println("No BTC address configured: set btcString in " + cfg_path + " or NERDMINER_BTC.")
+        return 2
+    }
+    wifi_init()
+    print_settings(s)
+    println("")
+    println("Initiating tasks...")
+    println("[MONITOR] started")
+    return worker_loop(s, run_secs, monitor_secs, miners)
+}

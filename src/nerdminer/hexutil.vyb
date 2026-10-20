@@ -1,0 +1,102 @@
+# hexutil.vyb -- hex <-> byte helpers (upstream: utils.cpp hex/to_byte_array,
+# reverse_bytes, swap_endian_words; stratum.cpp String(nonce, HEX)).
+#
+# Bytes are carried as Vec<Int> holding 0..255.
+
+# Value of one ASCII hex digit (accepts 0-9, a-f, A-F). Upstream `hex()` used
+# `(ch > 57) ? ch - 55 : ch - 48` masked to 4 bits, which only works for
+# uppercase / digits after masking; lowercase pool hex works there by luck of the
+# 0x0F mask. We decode explicitly.
+share(all)
+hex_nibble(c<Int>)<Int> -> {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 102) { return c - 87 }
+    if (c >= 65 && c <= 70) { return c - 55 }
+    return 0
+}
+
+# "0a1b" -> [10, 27]
+share(all)
+hex_to_bytes(s<String>)<Vec<Int>> -> {
+    out<Vec<Int>> = Vec()
+    n<Int> = s.len() / 2
+    if (n == 0) { return out }
+    for (i in 0..n-1) {
+        out.push((hex_nibble(s.char_at(2 * i)) << 4) | hex_nibble(s.char_at(2 * i + 1)))
+    }
+    return out
+}
+
+# NB: in this Vyb build String.substring is (start, end) -- not (start, len)
+# as the README table says. See README "Vyb gaps".
+hex_digit(v<Int>)<String> -> {
+    d<Int> = v & 15
+    return "0123456789abcdef".substring(d, d + 1)
+}
+
+# Lowercase, zero-padded two digits per byte.
+share(all)
+bytes_to_hex(b<their<Vec<Int> const>>)<String> -> {
+    s<String> = ""
+    n<Int> = b.len()
+    if (n == 0) { return s }
+    for (i in 0..n-1) {
+        v<Int> = b.get(i)
+        s = s + hex_digit(v >> 4) + hex_digit(v)
+    }
+    return s
+}
+
+# Parse an unsigned hex string (no 0x prefix) into an Int.
+share(all)
+parse_hex(s<String>)<Int> -> {
+    v<Int> = 0
+    n<Int> = s.len()
+    if (n == 0) { return 0 }
+    for (i in 0..n-1) { v = (v << 4) | hex_nibble(s.char_at(i)) }
+    return v
+}
+
+# Arduino `String(value, HEX)`: lowercase, no padding, "0" for zero.
+share(all)
+int_to_hex(value<Int>)<String> -> {
+    if (value == 0) { return "0" }
+    s<String> = ""
+    v<Int> = value
+    while (v > 0) {
+        s = hex_digit(v & 15) + s
+        v = v >> 4
+    }
+    return s
+}
+
+# Left-pad `s` with `ch` up to `width` characters.
+share(all)
+pad_left(s<String>, width<Int>, ch<String>)<String> -> {
+    r<String> = s
+    while (r.len() < width) { r = ch + r }
+    return r
+}
+
+# Reverse a byte vector (upstream reverse_bytes).
+share(all)
+reverse_bytes(b<their<Vec<Int> const>>)<Vec<Int>> -> {
+    out<Vec<Int>> = Vec()
+    n<Int> = b.len()
+    if (n == 0) { return out }
+    for (i in 0..n-1) { out.push(b.get(n - 1 - i)) }
+    return out
+}
+
+# Reverse each 4-byte word in place order (upstream swap_endian_words /
+# the "reverse prev hash (4-byte word swap)" loop in calculateMiningData).
+share(all)
+swap_words(b<their<Vec<Int> const>>)<Vec<Int>> -> {
+    out<Vec<Int>> = Vec()
+    words<Int> = b.len() / 4
+    if (words == 0) { return out }
+    for (w in 0..words-1) {
+        for (j in 0..3) { out.push(b.get(w * 4 + 3 - j)) }
+    }
+    return out
+}

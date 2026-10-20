@@ -1,0 +1,220 @@
+# json.vyb -- the small slice of JSON a stratum v1 client needs.
+#
+# Upstream parses every pool line with ArduinoJson (`StaticJsonDocument<4096>`,
+# stratum.cpp) and indexes heterogeneous arrays such as
+#   {"id":null,"method":"mining.notify","params":["job",...,["m0","m1"],...,false]}
+# Vyb's built-in `T::from_string(json)` maps objects onto structs (config.vyb
+# uses it for /config.json), but stratum `params` / `result` are positional,
+# mixed-type arrays, so this module scans raw JSON text instead: values come
+# back as their raw JSON source text, and callers unwrap with json_str/json_int/
+# json_float/json_bool.
+
+CH_QUOTE<Int> = 34
+CH_BSLASH<Int> = 92
+CH_COMMA<Int> = 44
+CH_COLON<Int> = 58
+CH_LBRACK<Int> = 91
+CH_RBRACK<Int> = 93
+CH_LBRACE<Int> = 123
+CH_RBRACE<Int> = 125
+
+is_space(c<Int>)<Bool> -> {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+skip_ws(s<String>, i<Int>)<Int> -> {
+    j<Int> = i
+    while (j < s.len() && is_space(s.char_at(j))) { j = j + 1 }
+    return j
+}
+
+# Index one past the end of the JSON value starting at `i`.
+value_end(s<String>, i<Int>)<Int> -> {
+    n<Int> = s.len()
+    j<Int> = i
+    if (j >= n) { return n }
+    c<Int> = s.char_at(j)
+    if (c == CH_QUOTE) {
+        j = j + 1
+        while (j < n) {
+            d<Int> = s.char_at(j)
+            if (d == CH_BSLASH) { j = j + 2 }
+            else {
+                if (d == CH_QUOTE) { return j + 1 }
+                j = j + 1
+            }
+        }
+        return n
+    }
+    if (c == CH_LBRACK || c == CH_LBRACE) {
+        depth<Int> = 0
+        while (j < n) {
+            d<Int> = s.char_at(j)
+            if (d == CH_QUOTE) {
+                j = value_end(s, j)
+            }
+            else {
+                if (d == CH_LBRACK || d == CH_LBRACE) { depth = depth + 1 }
+                if (d == CH_RBRACK || d == CH_RBRACE) {
+                    depth = depth - 1
+                    if (depth == 0) { return j + 1 }
+                }
+                j = j + 1
+            }
+        }
+        return n
+    }
+    # number / true / false / null: run to the next delimiter
+    while (j < n) {
+        d<Int> = s.char_at(j)
+        if (d == CH_COMMA || d == CH_RBRACK || d == CH_RBRACE || is_space(d)) { return j }
+        j = j + 1
+    }
+    return n
+}
+
+# Raw source text of the top-level member `key` of a JSON object, absent when
+# the line is not an object or has no such member.
+share(all)
+json_value(s<String>, key<String>)<String?> -> {
+    i<Int> = skip_ws(s, 0)
+    if (i >= s.len() || s.char_at(i) != CH_LBRACE) { return String?() }
+    i = i + 1
+    while (i < s.len()) {
+        i = skip_ws(s, i)
+        if (i >= s.len()) { return String?() }
+        if (s.char_at(i) == CH_RBRACE) { return String?() }
+        if (s.char_at(i) == CH_COMMA) { i = skip_ws(s, i + 1) }
+        kend<Int> = value_end(s, i)
+        k<String> = json_str(s.substring(i, kend))
+        i = skip_ws(s, kend)
+        if (i >= s.len() || s.char_at(i) != CH_COLON) { return String?() }
+        i = skip_ws(s, i + 1)
+        vend<Int> = value_end(s, i)
+        if (k == key) { return String?(s.substring(i, vend)) }
+        i = vend
+    }
+    return String?()
+}
+
+# Does the top-level object contain `key`? (ArduinoJson doc.containsKey)
+share(all)
+json_has(s<String>, key<String>)<Bool> -> {
+    match (json_value(s, key)) {
+        v -> { return true }
+        ? -> { return false }
+    }
+    return false
+}
+
+# Raw source text of each element of a JSON array.
+share(all)
+json_items(arr<String>)<Vec<String>> -> {
+    out<Vec<String>> = Vec()
+    i<Int> = skip_ws(arr, 0)
+    if (i >= arr.len() || arr.char_at(i) != CH_LBRACK) { return out }
+    i = skip_ws(arr, i + 1)
+    while (i < arr.len()) {
+        if (arr.char_at(i) == CH_RBRACK) { return out }
+        e<Int> = value_end(arr, i)
+        out.push(arr.substring(i, e))
+        i = skip_ws(arr, e)
+        if (i < arr.len() && arr.char_at(i) == CH_COMMA) { i = skip_ws(arr, i + 1) }
+    }
+    return out
+}
+
+# Element `idx` of a JSON array ("" when out of range).
+share(all)
+json_at(arr<String>, idx<Int>)<String> -> {
+    items<Vec<String>> = json_items(arr)
+    if (idx < 0 || idx >= items.len()) { return "" }
+    return items.get(idx)
+}
+
+# Unquote a JSON string literal (stratum hex/job ids never carry escapes, so
+# only \" and \\ are folded). Non-strings come back unchanged.
+share(all)
+json_str(raw<String>)<String> -> {
+    t<String> = raw.trim()
+    if (t.len() >= 2 && t.char_at(0) == CH_QUOTE) {
+        body<String> = t.substring(1, t.len() - 1)
+        return body.replace("\\\"", "\"").replace("\\\\", "\\")
+    }
+    return t
+}
+
+share(all)
+json_is_null(raw<String>)<Bool> -> {
+    t<String> = raw.trim()
+    return t == "null" || t.len() == 0
+}
+
+share(all)
+json_bool(raw<String>)<Bool> -> {
+    return raw.trim() == "true"
+}
+
+# Integer value of a JSON number literal (ignores any fraction).
+share(all)
+json_int(raw<String>)<Int> -> {
+    t<String> = raw.trim()
+    v<Int> = 0
+    neg<Bool> = false
+    i<Int> = 0
+    if (t.len() > 0 && t.char_at(0) == 45) {
+        neg = true
+        i = 1
+    }
+    while (i < t.len() && t.char_at(i) >= 48 && t.char_at(i) <= 57) {
+        v = v * 10 + (t.char_at(i) - 48)
+        i = i + 1
+    }
+    if (neg) { return 0 - v }
+    return v
+}
+
+# Float value of a JSON number literal: [-]int[.frac][e[+-]exp].
+share(all)
+json_float(raw<String>)<Float> -> {
+    t<String> = raw.trim()
+    n<Int> = t.len()
+    i<Int> = 0
+    sign<Float> = 1.0
+    if (n > 0 && t.char_at(0) == 45) {
+        sign = -1.0
+        i = 1
+    }
+    v<Float> = 0.0
+    while (i < n && t.char_at(i) >= 48 && t.char_at(i) <= 57) {
+        v = v * 10.0 + ((t.char_at(i) - 48) as Float)
+        i = i + 1
+    }
+    if (i < n && t.char_at(i) == 46) {
+        i = i + 1
+        scale<Float> = 0.1
+        while (i < n && t.char_at(i) >= 48 && t.char_at(i) <= 57) {
+            v = v + ((t.char_at(i) - 48) as Float) * scale
+            scale = scale / 10.0
+            i = i + 1
+        }
+    }
+    if (i < n && (t.char_at(i) == 101 || t.char_at(i) == 69)) {
+        i = i + 1
+        eneg<Bool> = false
+        if (i < n && (t.char_at(i) == 45 || t.char_at(i) == 43)) {
+            eneg = t.char_at(i) == 45
+            i = i + 1
+        }
+        ex<Int> = 0
+        while (i < n && t.char_at(i) >= 48 && t.char_at(i) <= 57) {
+            ex = ex * 10 + (t.char_at(i) - 48)
+            i = i + 1
+        }
+        while (ex > 0) {
+            if (eneg) { v = v / 10.0 } else { v = v * 10.0 }
+            ex = ex - 1
+        }
+    }
+    return sign * v
+}

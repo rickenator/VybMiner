@@ -1,0 +1,216 @@
+# mining.vyb -- job preparation and the nonce search
+# (upstream: utils.cpp calculateMiningData / getNextExtranonce2 / diff_from_target /
+#  checkValid, and the hashing half of mining.cpp runMiner).
+
+import nerdminer::sha256
+import nerdminer::hexutil
+import nerdminer::stratum
+
+# mining.h (Release-1.6.3)
+share(all)
+enum MiningConst {
+    MAX_NONCE_STEP = 5000000
+    MAX_NONCE = 25000000
+    TARGET_NONCE = 471136297
+    KEEPALIVE_TIME_ms = 30000
+    POOLINACTIVITY_TIME_ms = 60000
+}
+
+DEFAULT_DIFFICULTY<Float> = 0.0001
+
+share(all)
+default_difficulty()<Float> -> {
+    return DEFAULT_DIFFICULTY
+}
+
+# 2^224 * 0xFFFF -- difficulty-1 target as a double (utils.cpp truediffone).
+TRUEDIFFONE<Float> = 26959535291011309493156476344723991336010898738574164086137773096960.0
+
+# miner_data (mining.h) plus the per-job values the hot loop wants precomputed:
+# the midstate over header[0..63] and the three big-endian tail words.
+share(all)
+struct MinerData {
+    header<Vec<Int>>,
+    target<Vec<Int>>,
+    merkle_root<String>,
+    pool_difficulty<Float>,
+    midstate<Vec<UInt32>>,
+    t0<UInt32>,
+    t1<UInt32>,
+    t2<UInt32>,
+    in_run<Bool>,
+    new_job<Bool>
+}
+
+share(all)
+empty_miner()<MinerData> -> {
+    return MinerData { header = Vec(), target = Vec(), merkle_root = "", pool_difficulty = DEFAULT_DIFFICULTY,
+                       midstate = Vec(), t0 = 0 as UInt32, t1 = 0 as UInt32, t2 = 0 as UInt32,
+                       in_run = false, new_job = false }
+}
+
+# getNextExtranonce2: upstream treats the extranonce2 *hex field* as a decimal
+# counter (strtoul base 10, ultoa base 10) zero-padded to 2*size characters.
+# Quirky but harmless -- the pool only needs uniqueness -- and reproduced here
+# so submits look identical to the device's.
+share(all)
+next_extranonce2(size<Int>, current<String>)<String> -> {
+    width<Int> = 2 * size
+    v<Int> = 0
+    if (current.len() > 0) {
+        for (i in 0..current.len()-1) {
+            c<Int> = current.char_at(i)
+            if (c >= 48 && c <= 57) { v = v * 10 + (c - 48) }
+        }
+    }
+    v = v + 1
+    # overflow past 10^width -> all zeros, like the early return upstream
+    limit<Int> = 1
+    for (k in 1..width) {
+        if (limit < 1000000000000000000) { limit = limit * 10 }
+    }
+    if (width < 19 && v >= limit) { return pad_left("", width, "0") }
+    return pad_left(v.to_string(), width, "0")
+}
+
+# nbits -> 32-byte big-endian target: (nbits[2:] + '00'*(exp-3)).zfill(64).
+# Upstream writes the mantissa at offset (exp-3)-2 from the left, which equals
+# the correct 58-2*(exp-3) only for exp == 0x17 (today's mainnet) -- fixed here.
+share(all)
+target_from_nbits(nbits<String>)<Vec<Int>> -> {
+    expn<Int> = parse_hex(nbits.substring(0, 2))
+    mant<String> = nbits.substring(2, nbits.len())
+    zeros<Int> = expn - 3
+    hex<String> = mant
+    if (zeros > 0) {
+        for (i in 1..zeros) { hex = hex + "00" }
+    }
+    hex = pad_left(hex, 64, "0")
+    return hex_to_bytes(hex)
+}
+
+# Concatenate two byte vectors.
+concat(a<their<Vec<Int> const>>, b<their<Vec<Int> const>>)<Vec<Int>> -> {
+    out<Vec<Int>> = Vec()
+    if (a.len() > 0) { for (i in 0..a.len()-1) { out.push(a.get(i)) } }
+    if (b.len() > 0) { for (i in 0..b.len()-1) { out.push(b.get(i)) } }
+    return out
+}
+
+# Reverse bytes [off, off+n) of `b` in place.
+reverse_range(b<their<Vec<Int>>>, off<Int>, n<Int>)<Int> -> {
+    for (j in 0..(n/2)-1) {
+        x<Int> = b.get(off + j)
+        b.set(off + j, b.get(off + n - 1 - j))
+        b.set(off + n - 1 - j, x)
+    }
+    return 0
+}
+
+# calculateMiningData (utils.cpp). Bumps worker.extranonce2 like upstream.
+share(all)
+calculate_mining_data(worker<their<MiningSubscribe>>, job<MiningJob>)<MinerData> -> {
+    m<MinerData> = empty_miner()
+    m.target = target_from_nbits(job.nbits)
+    tgt<Vec<Int>> = m.target
+    println("    target: " + bytes_to_hex(view(tgt)))
+
+    worker.extranonce2 = next_extranonce2(worker.extranonce2_size, worker.extranonce2)
+
+    coinbase<String> = job.coinb1 + worker.extranonce1 + worker.extranonce2 + job.coinb2
+    println("    coinbase: " + coinbase)
+    cb<Vec<Int>> = hex_to_bytes(coinbase)
+    merkle<Vec<Int>> = sha256d(view(cb))
+
+    branch<Vec<String>> = job.merkle_branch
+    nb<Int> = branch.len()
+    if (nb > 0) {
+        for (k in 0..nb-1) {
+            elem<Vec<Int>> = hex_to_bytes(branch.get(k))
+            cat<Vec<Int>> = concat(view(merkle), view(elem))
+            merkle = sha256d(view(cat))
+        }
+    }
+    m.merkle_root = bytes_to_hex(view(merkle))
+    println("    merkle sha         : " + m.merkle_root)
+
+    # version + prevhash + merkle_root + ntime + nbits + nonce(0)
+    hdr<Vec<Int>> = hex_to_bytes(job.version + job.prev_block_hash + m.merkle_root + job.ntime + job.nbits + "00000000")
+    reverse_range(borrow(hdr), 0, 4)                       # version
+    for (w in 0..7) { reverse_range(borrow(hdr), 4 + w * 4, 4) }  # prevhash 4-byte words
+    reverse_range(borrow(hdr), 68, 4)                      # ntime
+    reverse_range(borrow(hdr), 72, 4)                      # nbits
+    m.header = hdr
+    m.midstate = nerd_mids(view(hdr))
+    m.t0 = be_word(view(hdr), 64)
+    m.t1 = be_word(view(hdr), 68)
+    m.t2 = be_word(view(hdr), 72)
+    return m
+}
+
+# le256todouble + diff_from_target: hash is the raw little-endian digest.
+share(all)
+diff_from_target(hash<their<Vec<Int> const>>)<Float> -> {
+    v<Float> = 0.0
+    for (k in 0..31) { v = v * 256.0 + (hash.get(31 - k) as Float) }
+    if (v == 0.0) { v = 1.0 }
+    return TRUEDIFFONE / v
+}
+
+# checkValid: hash (LE) <= target (BE). Upstream's version memcpy's the
+# *pointer* and loops a uint8_t `i >= 0` forever-until-break, so it is
+# effectively "never valid"; this is the comparison it intended.
+share(all)
+check_valid(hash<their<Vec<Int> const>>, target_be<their<Vec<Int> const>>)<Bool> -> {
+    for (k in 0..31) {
+        h<Int> = hash.get(31 - k)
+        t<Int> = target_be.get(k)
+        if (h < t) { return true }
+        if (h > t) { return false }
+    }
+    return true
+}
+
+# Result of scanning one slice of nonces.
+share(all)
+struct Slice {
+    next_nonce<Int>,
+    hit_nonce<Int>,
+    hashes<Int>
+}
+
+# Inner loop of runMiner: hash `count` nonces starting at `start`, stepping by
+# `stride` (upstream: 2 tasks, miner_id parity). Stops at the first 16-bit
+# candidate (hash[30]==hash[31]==0, i.e. low 16 bits of digest word 7) so the
+# caller can evaluate / submit it, mirroring the `continue` structure upstream.
+# `end_nonce` is TARGET_NONCE on the miner path (upstream's `nonce > TARGET_NONCE`).
+share(all)
+mine_slice(m<their<MinerData const>>, start<Int>, count<Int>, stride<Int>, end_nonce<Int>)<Slice> -> {
+    mid<Vec<UInt32>> = m.midstate
+    t0<UInt32> = m.t0
+    t1<UInt32> = m.t1
+    t2<UInt32> = m.t2
+    nonce<Int> = start
+    done<Int> = 0
+    mask<UInt32> = 0xffff as UInt32
+    zero<UInt32> = 0 as UInt32
+    while (done < count) {
+        if (nonce > end_nonce) {
+            return Slice { next_nonce = nonce, hit_nonce = -1, hashes = done }
+        }
+        h7<UInt32> = nerd_sha256d_h7(view(mid), t0, t1, t2, nonce as UInt32)
+        done = done + 1
+        if ((h7 & mask) == zero) {
+            return Slice { next_nonce = nonce + stride, hit_nonce = nonce, hashes = done }
+        }
+        nonce = nonce + stride
+    }
+    return Slice { next_nonce = nonce, hit_nonce = -1, hashes = done }
+}
+
+# Full digest for a candidate nonce (LE bytes, as upstream's `hash[32]`).
+share(all)
+hash_nonce(m<their<MinerData const>>, nonce<Int>)<Vec<Int>> -> {
+    mid<Vec<UInt32>> = m.midstate
+    return nerd_sha256d(view(mid), m.t0, m.t1, m.t2, nonce as UInt32)
+}

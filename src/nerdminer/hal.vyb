@@ -1,0 +1,52 @@
+# hal.vyb -- the board-support surface the ESP32 firmware has and the host
+# reconstruction does not. Each function names the upstream code it stands in
+# for; on the host they are inert (or print), which is enough for the stratum +
+# hashing path. A real ESP32 port would bind these to ESP-IDF via Vyb's FFI.
+
+# initDisplay / drawLoadingScreen / drawCurrentScreen / animateCurrentScreen
+# (drivers/displays/tDisplayDriver.cpp, TFT_eSPI + OpenFontRender, 320x170).
+share(all)
+display_init()<Int> -> {
+    return 0
+}
+
+share(all)
+display_draw_loading()<Int> -> {
+    println("[HAL] display: loading screen (TFT not present on host)")
+    return 0
+}
+
+# doLedStuff (RGB LED over RMT on boards that have one).
+share(all)
+led_status(state<String>)<Int> -> {
+    return 0
+}
+
+# init_WifiManager (wManager.cpp): STA autoconnect from NVS, else SoftAP
+# "NerdMinerAP" captive portal that writes /config.json. On the host the OS
+# owns networking, so this just reports that we are "connected".
+share(all)
+wifi_init()<Bool> -> {
+    println("")
+    println("WiFi connected (host network stack; SoftAP/captive portal not emulated)")
+    return true
+}
+
+share(all)
+wifi_connected()<Bool> -> {
+    return true
+}
+
+# esp_task_wdt_* (15-minute miner watchdog) -- nothing to feed on the host.
+share(all)
+watchdog_feed()<Int> -> {
+    return 0
+}
+
+# saveStat / restoreStat (NVS namespace "state": best_diff, Mhashes, shares,
+# valids, templates, upTime). Off by default (saveStatsToNVS=false on this
+# device); not persisted on the host.
+share(all)
+nvs_save_stats_supported()<Bool> -> {
+    return false
+}

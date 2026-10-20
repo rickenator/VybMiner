@@ -1,0 +1,7 @@
+[package]
+name = "nerdminer-vyb"
+version = "0.1.0"
+
+[[bin]]
+name = "nerdminer"
+path = "src/main.vyb"

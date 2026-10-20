@@ -1,0 +1,51 @@
+# test_sha256.vyb -- known-answer tests for the Vyb SHA-256 core.
+#   * FIPS 180-4 "abc"
+#   * Bitcoin genesis block header through the midstate fast path
+# Run:  $VYB test/test_sha256.vyb --module-path src
+
+import nerdminer::sha256
+import nerdminer::hexutil
+
+check(name<String>, got<String>, want<String>)<Int> -> {
+    if (got == want) {
+        println("PASS " + name)
+        return 0
+    }
+    println("FAIL " + name + "\n  got  " + got + "\n  want " + want)
+    return 1
+}
+
+main()<Int> -> {
+    fails<Int> = 0
+
+    abc<Vec<Int>> = Vec()
+    abc.push(97)
+    abc.push(98)
+    abc.push(99)
+    d<Vec<Int>> = sha256(view(abc))
+    fails = fails + check("sha256(abc)", bytes_to_hex(view(d)),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    genesis<String> = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"
+    hdr<Vec<Int>> = hex_to_bytes(genesis)
+    full<Vec<Int>> = sha256d(view(hdr))
+    rev<Vec<Int>> = reverse_bytes(view(full))
+    want_hash<String> = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+    fails = fails + check("sha256d(genesis header)", bytes_to_hex(view(rev)), want_hash)
+
+    mid<Vec<UInt32>> = nerd_mids(view(hdr))
+    t0<UInt32> = be_word(view(hdr), 64)
+    t1<UInt32> = be_word(view(hdr), 68)
+    t2<UInt32> = be_word(view(hdr), 72)
+    nonce<UInt32> = 2083236893 as UInt32
+    fast<Vec<Int>> = nerd_sha256d(view(mid), t0, t1, t2, nonce)
+    frev<Vec<Int>> = reverse_bytes(view(fast))
+    fails = fails + check("nerd_sha256d(midstate, genesis)", bytes_to_hex(view(frev)), want_hash)
+    h7<UInt32> = nerd_sha256d_h7(view(mid), t0, t1, t2, nonce)
+    fails = fails + check("nerd_sha256d_h7 == 0 (32-bit share)", h7.to_string(), "0")
+    h7b<UInt32> = nerd_sha256d_h7(view(mid), t0, t1, t2, nonce + (1 as UInt32))
+    fails = fails + check("nonce+1 is not a share", (h7b == (0 as UInt32)).to_string(), "false")
+
+    if (fails == 0) { println("ALL SHA256 TESTS PASSED") }
+    return fails
+}
