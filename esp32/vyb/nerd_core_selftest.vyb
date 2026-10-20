@@ -1,0 +1,14 @@
+# nerd_core_selftest.vyb -- host (JIT) check of the freestanding ESP32 core.
+#   $VYB esp32/vyb/nerd_core_selftest.vyb --module-path esp32/vyb
+# (GENERATED with nerd_core.vyb by tools/gen_sha256.py --esp32-core esp32/vyb)
+import nerd_core
+
+main()<Int> -> {
+    r<UInt32> = nm_selftest()
+    println("nerd_core genesis word7 = " + r.to_string() + " (expect 0)")
+    # Genesis nonce is 0x7c2bac1d; scanning from 16 below it with stride 1 must stop at index 16.
+    hit<UInt32> = nm_scan((0xbc909a33 as UInt32), (0x6358bff0 as UInt32), (0x90ccac7d as UInt32), (0x1e59caa8 as UInt32), (0xc3c8d8e9 as UInt32), (0x4f0103c8 as UInt32), (0x96b18736 as UInt32), (0x4719f91b as UInt32), (0x4b1e5e4a as UInt32), (0x29ab5f49 as UInt32), (0xffff001d as UInt32), (0x7c2bac0d as UInt32), (64 as UInt32), (1 as UInt32))
+    println("nerd_core nm_scan hit index = " + hit.to_string() + " (expect 16)")
+    if (r == (0 as UInt32) && hit == (16 as UInt32)) { return 0 }
+    return 1
+}

@@ -237,13 +237,15 @@ if "--esp32-core" in _sys.argv:
     # Scalar-only hot path for the ESP32 probe: no Vec, no String, so the only
     # runtime symbols left in the IR are the call-frame push/pop hooks.
     out.clear()
-    P("""# nerd_core.vyb -- ESP32 probe: the NerdMiner hot path as a runtime-light,
-# scalar-only Vyb module (GENERATED: python3 tools/gen_sha256.py --esp32-core).
-# Midstate words m0..m7, header-tail words t0..t2 (big-endian), nonce as stored
-# little-endian at header[76..79]. Returns digest word 7 of sha256d(header);
-# (w7 & 0xffff) == 0 is upstream's 16-bit share pre-filter.
+    P("""# nerd_core.vyb -- the NerdMiner hot path as a freestanding, scalar-only Vyb
+# module (GENERATED: python3 tools/gen_sha256.py --esp32-core esp32/vyb).
+# No String/Vec/println: it uses no Vyb host runtime, so `vyb --target
+# xtensa-esp32s3-elf` compiles it straight to an ESP32-S3 object.
 #
-# Built for Xtensa ESP32-S3 by esp32/build_core.sh (Vyb --emit-llvm -> esp-clang).
+# Midstate words m0..m7, header-tail words t0..t2 (big-endian), nonce as stored
+# little-endian at header[76..79]. nm_sha256d_h7 returns digest word 7 of
+# sha256d(header); (w7 & 0xffff) == 0 is upstream's 16-bit share pre-filter.
+# C prototypes: esp32/components/vyb_nerd_core/include/nerd_core.h
 
 share(all)
 nm_sha256d_h7(m0<UInt32>, m1<UInt32>, m2<UInt32>, m3<UInt32>, m4<UInt32>, m5<UInt32>, m6<UInt32>, m7<UInt32>,
@@ -278,14 +280,55 @@ nm_sha256d_h7(m0<UInt32>, m1<UInt32>, m2<UInt32>, m3<UInt32>, m4<UInt32>, m5<UIn
     _mid = _compress(IV, _st.unpack(">16I", _g[:64]))
     _t = _st.unpack(">3I", _g[64:76]); _nonce = _st.unpack("<I", _g[76:80])[0]
     args = ", ".join(u(x) for x in _mid) + ", " + ", ".join(u(x) for x in _t) + ", " + u(_nonce)
-    P(f"""# Host self-check: Bitcoin genesis block header -> digest word 7 must be 0.
+    P("""# Nonce scan: hash nonces start, start+stride, ... (count of them) and return
+# the index of the first one passing the 16-bit pre-filter, or `count` if none.
+# This is upstream runMiner()'s inner loop; the C shell verifies a hit with a full
+# sha256d and the pool difficulty before submitting.
+share(all)
+nm_scan(m0<UInt32>, m1<UInt32>, m2<UInt32>, m3<UInt32>, m4<UInt32>, m5<UInt32>, m6<UInt32>, m7<UInt32>,
+        t0<UInt32>, t1<UInt32>, t2<UInt32>, start<UInt32>, count<UInt32>, stride<UInt32>)<UInt32> -> {
+    i<UInt32> = 0 as UInt32
+    nonce<UInt32> = start
+    mask<UInt32> = 0xffff as UInt32
+    zero<UInt32> = 0 as UInt32
+    one<UInt32> = 1 as UInt32
+    while (i < count) {
+        h<UInt32> = nm_sha256d_h7(m0, m1, m2, m3, m4, m5, m6, m7, t0, t1, t2, nonce)
+        if ((h & mask) == zero) { return i }
+        i = i + one
+        nonce = nonce + stride
+    }
+    return count
+}
+
+# ABI probe the device self-test calls at boot: proves the Vyb object links and
+# runs under ESP-IDF before any mining starts. Genesis block -> 0.
+share(all)
+nm_selftest()<UInt32> -> {""")
+    P(f"    return nm_sha256d_h7({args})")
+    P("}")
+    core = "\n".join(out) + "\n"
+    selftest = f"""# nerd_core_selftest.vyb -- host (JIT) check of the freestanding ESP32 core.
+#   $VYB esp32/vyb/nerd_core_selftest.vyb --module-path esp32/vyb
+# (GENERATED with nerd_core.vyb by tools/gen_sha256.py --esp32-core esp32/vyb)
+import nerd_core
+
 main()<Int> -> {{
-    r<UInt32> = nm_sha256d_h7({args})
+    r<UInt32> = nm_selftest()
     println("nerd_core genesis word7 = " + r.to_string() + " (expect 0)")
-    if (r == (0 as UInt32)) {{ return 0 }}
+    # Genesis nonce is 0x7c2bac1d; scanning from 16 below it with stride 1 must stop at index 16.
+    hit<UInt32> = nm_scan({args.rsplit(", ", 1)[0]}, (0x7c2bac0d as UInt32), (64 as UInt32), (1 as UInt32))
+    println("nerd_core nm_scan hit index = " + hit.to_string() + " (expect 16)")
+    if (r == (0 as UInt32) && hit == (16 as UInt32)) {{ return 0 }}
     return 1
-}}""")
-    print("\n".join(out))
+}}
+"""
+    import os as _os
+    dst = _sys.argv[_sys.argv.index("--esp32-core") + 1] if len(_sys.argv) > _sys.argv.index("--esp32-core") + 1 else "esp32/vyb"
+    _os.makedirs(dst, exist_ok=True)
+    open(_os.path.join(dst, "nerd_core.vyb"), "w").write(core)
+    open(_os.path.join(dst, "nerd_core_selftest.vyb"), "w").write(selftest)
+    print("wrote", dst + "/nerd_core.vyb", dst + "/nerd_core_selftest.vyb")
 else:
     sha256d_tail("nerd_sha256d_h7", False)
     sha256d_tail("nerd_sha256d", True)

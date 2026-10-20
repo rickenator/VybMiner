@@ -1,25 +1,26 @@
 #!/bin/sh
-# build_core.sh -- compile the Vyb NerdMiner hot path for ESP32-S3 (Xtensa LX7).
+# build_core.sh -- (re)generate the Vyb ESP32-S3 object that the firmware links,
+# with Vyb alone:
 #
-# Pipeline:  nerd_core.vyb --(vyb --emit-llvm)--> nerd_core.ll (x86-64 IR)
-#            --(llvm-extract nm_sha256d_h7, strip debug, retarget)--> core.xtensa.ll
-#            --(Espressif clang, -mcpu=esp32s3)--> nerd_core_esp32s3.o
-# Needs: $VYB (Vyb compiler), host LLVM 18 tools (llvm-extract/opt), and
-# Espressif's LLVM fork (esp-clang; `idf_tools.py install esp-clang`).
-# Upstream LLVM 18's Xtensa target is MC-only ("target does not support
-# generation of this file type"), hence esp-clang.
+#   vyb --target xtensa-esp32s3-elf -O3 -c nerd_core.o vyb/nerd_core.vyb
+#
+# and refresh components/vyb_nerd_core/prebuilt/ (object, disassembly, sums).
+# Needs a vyb built against an Xtensa-enabled LLVM 18 (Espressif's fork; see
+# README.md "Building Vyb with the Xtensa backend"). Disassembly uses any
+# Xtensa objdump it can find (ESP-IDF's xtensa-esp32s3-elf-objdump or esp-clang's
+# llvm-objdump); it is optional.
+#   VYB_XTENSA=/path/to/vyb esp32/build_core.sh
 set -eu
 cd "$(dirname "$0")"
-: "${VYB:?set VYB to the vyb compiler}"
-ESPB="${ESP_CLANG_BIN:-$(ls -d "$HOME"/.espressif/tools/esp-clang/*/esp-clang/bin | tail -1)}"
-"$VYB" nerd_core.vyb --emit-llvm --no-execute -O2 >/dev/null
-llvm-extract -func=nm_sha256d_h7 -rglob='.*str.*' nerd_core.ll -S -o core.extract.ll
-opt -strip-debug -S core.extract.ll -o core.nodbg.ll
-# Retarget: drop the x86-64 datalayout/triple; esp-clang supplies Xtensa's.
-sed -e '/^target datalayout/d' -e 's/^target triple = .*/target triple = "xtensa-esp-unknown-elf"/' \
-    core.nodbg.ll > core.xtensa.ll
-"$ESPB/clang" --target=xtensa-esp-elf -mcpu=esp32s3 -O2 -c core.xtensa.ll -o nerd_core_esp32s3.o
-"$ESPB/clang" --target=xtensa-esp-elf -mcpu=esp32s3 -O2 -c frame_stubs.c -o frame_stubs_esp32s3.o
-"$ESPB/llvm-objdump" -d nerd_core_esp32s3.o > nerd_core_esp32s3.S
-"$ESPB/llvm-size" nerd_core_esp32s3.o
-echo "undefined symbols:"; "$ESPB/llvm-objdump" -t nerd_core_esp32s3.o | grep '\*UND\*' || true
+V="${VYB_XTENSA:-${VYB:?set VYB_XTENSA (or VYB) to an Xtensa-capable vyb}}"
+OUT=components/vyb_nerd_core/prebuilt/esp32s3
+mkdir -p "$OUT"
+"$V" --target xtensa-esp32s3-elf -O3 -c "$OUT/nerd_core.o" vyb/nerd_core.vyb
+python3 ../tools/elf_syms.py "$OUT/nerd_core.o"
+OD=$(command -v xtensa-esp32s3-elf-objdump || ls "$HOME"/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump 2>/dev/null | tail -1 || true)
+if [ -n "$OD" ]; then
+    "$OD" -d "$OUT/nerd_core.o" > "$OUT/nerd_core.S"
+    echo "disassembly: $OUT/nerd_core.S ($(grep -c '^ *[0-9a-f]*:' "$OUT/nerd_core.S") instructions)"
+fi
+"$V" --version | head -1 > "$OUT/VYB_VERSION"
+(cd components/vyb_nerd_core/prebuilt && sha256sum esp32s3/nerd_core.o > SHA256SUMS && cat SHA256SUMS)
