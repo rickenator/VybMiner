@@ -116,7 +116,7 @@ two-compression tail hash per nonce with the padding words folded to constants.
 
 `esp32/components/vyb_nerd_core/prebuilt/esp32s3/nerd_core.S` is the
 disassembly of the object Vyb itself emits (`vyb --target xtensa-esp32s3-elf
--O3`, Vyb branch `esp32-xtensa-target`, Espressif LLVM 18 backend), linked into
+-O3`, Vyb `main` since #491, Espressif LLVM 18 backend), linked into
 IRAM like upstream's `nerd_sha256d`:
 
 | | upstream `nerd_sha256d` (GCC, IRAM) | Vyb `nm_sha256d_h7` + `nm_scan` + `nm_selftest` |

@@ -57,8 +57,8 @@ Ubuntu 24.04 / Debian with LLVM 18:
 sudo apt-get install -y build-essential cmake ninja-build llvm-18-dev libclang-18-dev \
      clang-18 catch2 libssl-dev python3 git
 
-# 1. Vyb with --target support (branch esp32-xtensa-target; see "Vyb on Xtensa")
-git clone -b esp32-xtensa-target https://github.com/rickenator/Vyb.git ~/vyb
+# 1. Vyb with --target support (Vyb main; see "Vyb on Xtensa")
+git clone https://github.com/rickenator/Vyb.git ~/vyb
 cmake -S ~/vyb -B ~/vyb/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_DIR=/usr/lib/llvm-18/cmake -DVYB_USE_QT5=OFF -DVYB_BINDGEN_LIBCLANG=OFF
 cmake --build ~/vyb/build --target vyb
@@ -149,11 +149,10 @@ self-test passes and at least one share is accepted with none rejected.
 
 ## Vyb on Xtensa (ESP32 / ESP32-S2 / ESP32-S3)
 
-Native ESP32 code generation lives on Vyb branch
-[`esp32-xtensa-target`](https://github.com/rickenator/Vyb/tree/esp32-xtensa-target)
-(commit [`d5f1d52`](https://github.com/rickenator/Vyb/commit/d5f1d52126a08c02fa1cb243ed1843f1571c8306),
-documented in its [`doc/ESP32.md`](https://github.com/rickenator/Vyb/blob/esp32-xtensa-target/doc/ESP32.md)).
-It is not merged into Vyb `main`. It adds:
+Native ESP32 code generation is part of Vyb `main`
+(merged in [rickenator/Vyb#491](https://github.com/rickenator/Vyb/pull/491), merge commit
+[`b951726`](https://github.com/rickenator/Vyb/commit/b951726ca38c47c9fa86114b26669c8fe27cca21))
+and documented in [`doc/ESP32.md`](https://github.com/rickenator/Vyb/blob/main/doc/ESP32.md). It adds:
 
 * `--target <triple>` (plus `--mcpu`, `--mattr`, `-S`): a **freestanding**
   cross-compile mode — no JIT, no `main`, no runtime imports, no stack-trace
@@ -170,7 +169,7 @@ It is not merged into Vyb `main`. It adds:
   LLVM libraries, so this from-source build (~1 h, a few GB) is required:
 
 ```sh
-git clone -b esp32-xtensa-target https://github.com/rickenator/Vyb.git && cd Vyb
+git clone https://github.com/rickenator/Vyb.git && cd Vyb
 scripts/build-llvm-esp.sh ../llvm-esp18
 cmake -S . -B build-xtensa -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DLLVM_DIR=$PWD/../llvm-esp18/install/lib/cmake/llvm \

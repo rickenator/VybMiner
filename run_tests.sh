@@ -54,7 +54,7 @@ if "$VYB" --help 2>/dev/null | grep -q -- '--target'; then
     fi
     rm -rf "$out"
 else
-    echo "SKIP C shell + xtensa checks: this vyb has no --target flag (needs the esp32-xtensa-target Vyb branch)"
+    echo "SKIP C shell + xtensa checks: this vyb has no --target flag (needs Vyb main at or after b951726, PR #491)"
 fi
 [ $rc -eq 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
 exit $rc
